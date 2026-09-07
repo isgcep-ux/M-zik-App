@@ -1,0 +1,7 @@
+{
+  "name": "AI Müzik",
+  "description": "Yapay zeka ile beste yapan, şarkı sözü ve melodi üreten interaktif stüdyo ve müzik çalıcı.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
