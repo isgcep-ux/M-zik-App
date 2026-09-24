@@ -117,30 +117,62 @@ suspend fun mergeAudioStems(
     val beatDurationSec = 60.0 / bpm
     val chordDurationSec = beatDurationSec * 4.0
 
+    val chordPhases = DoubleArray(4) { 0.0 }
+    var bassPhase = 0.0
+    var leadPhase = 0.0
+    val melodyPattern = intArrayOf(0, 2, 1, 3, 2, 1, 3, 0)
+
     for (sample in 0 until totalSamples) {
       val t = sample.toDouble() / sampleRate
       val chordIdx = ((t / chordDurationSec).toInt()) % chords.size
       val activeNotes = chords[chordIdx]
+      val timeInBar = t % chordDurationSec
 
-      // Instrumental chords & bass
+      // 1. Warm Rhodes Piano (struck key natural decay)
+      val chordEnvelope = kotlin.math.exp(-timeInBar * 1.2) * 0.70 + 0.30
       var chordsWave = 0.0
-      for ((noteIdx, freq) in activeNotes.withIndex()) {
-        val harmonic = sin(2.0 * PI * freq * t) + 0.25 * sin(4.0 * PI * freq * t)
-        chordsWave += harmonic * (0.35 / (noteIdx + 1))
+      for (noteIdx in 0 until 4) {
+        val freq = if (noteIdx < activeNotes.size) activeNotes[noteIdx].toDouble() else 0.0
+        if (freq > 80.0) {
+          chordPhases[noteIdx] += 2.0 * PI * freq / sampleRate
+          if (chordPhases[noteIdx] >= 2.0 * PI) chordPhases[noteIdx] -= 2.0 * PI
+          val fundamental = sin(chordPhases[noteIdx])
+          val bellOvertone = 0.18 * sin(chordPhases[noteIdx] * 2.0)
+          chordsWave += (fundamental + bellOvertone) * (0.30 / (noteIdx + 1))
+        }
       }
-      val bassFreq = activeNotes.firstOrNull() ?: 146.83f
-      val bassWave = sin(2.0 * PI * bassFreq * t) * 0.55
+      chordsWave *= chordEnvelope
 
-      // Melody / Vocals
-      val noteStep = ((t * (bpm / 30.0)).toInt()) % activeNotes.size
-      val leadFreq = (activeNotes.getOrElse(noteStep) { 440f }) * 2.0f
-      val leadWave = sin(2.0 * PI * leadFreq * t) * 0.60
+      // 2. Warm Lofi Bass
+      val rootBassFreq = (activeNotes.firstOrNull()?.toDouble() ?: 110.0).coerceIn(45.0, 120.0)
+      bassPhase += 2.0 * PI * rootBassFreq / sampleRate
+      if (bassPhase >= 2.0 * PI) bassPhase -= 2.0 * PI
+      val timeInBeat = t % beatDurationSec
+      val bassPluck = kotlin.math.exp(-timeInBeat * 3.0) * 0.65 + 0.35
+      val bassWave = (sin(bassPhase) + 0.15 * sin(bassPhase * 2.0)) * bassPluck * 0.70
 
-      val mixedLeft = (chordsWave * 0.5 + bassWave * 0.5) * instrumentalVol + (leadWave * 0.85) * vocalsVol
-      val mixedRight = (chordsWave * 0.55 + bassWave * 0.45) * instrumentalVol + (leadWave * 0.80) * vocalsVol
+      // 3. Acoustic Kalimba Pluck (discrete musical notes - NO SIREN SLIDE)
+      val subStepDuration = beatDurationSec / 2.0
+      val stepIndex = ((t / subStepDuration).toInt()) % melodyPattern.size
+      val noteToneIdx = melodyPattern[stepIndex] % activeNotes.size
+      val discreteFreq = (activeNotes.getOrElse(noteToneIdx) { 440f }).toDouble() * 1.5
 
-      val clampedL = (mixedLeft * 14000.0).coerceIn(-32000.0, 32000.0).toInt().toShort()
-      val clampedR = (mixedRight * 14000.0).coerceIn(-32000.0, 32000.0).toInt().toShort()
+      leadPhase += 2.0 * PI * discreteFreq / sampleRate
+      if (leadPhase >= 2.0 * PI) leadPhase -= 2.0 * PI
+
+      val timeInNote = t % subStepDuration
+      val pluckEnv = kotlin.math.exp(-timeInNote * 6.5)
+      val leadWave = (sin(leadPhase) + 0.12 * sin(leadPhase * 2.0)) * pluckEnv * 0.55
+
+      // Stereo mix with soft saturation
+      val mixedLeft = (chordsWave * 0.45 + bassWave * 0.50) * instrumentalVol + (leadWave * 0.85) * vocalsVol
+      val mixedRight = (chordsWave * 0.50 + bassWave * 0.45) * instrumentalVol + (leadWave * 0.80) * vocalsVol
+
+      val satL = kotlin.math.tanh(mixedLeft * 1.05)
+      val satR = kotlin.math.tanh(mixedRight * 1.05)
+
+      val clampedL = (satL * 26000.0).toInt().toShort()
+      val clampedR = (satR * 26000.0).toInt().toShort()
 
       byteBuffer.putShort(clampedL)
       byteBuffer.putShort(clampedR)

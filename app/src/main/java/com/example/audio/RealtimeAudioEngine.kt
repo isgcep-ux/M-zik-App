@@ -7,7 +7,6 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -15,16 +14,20 @@ import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.math.sqrt
+import kotlin.math.tanh
 
 class RealtimeAudioEngine(
   private val scope: CoroutineScope
 ) {
   private val sampleRate = 44100
-  private val bufferSize = AudioTrack.getMinBufferSize(
+  // Provide plenty of buffer headroom (at least 16KB or 4x minBufferSize) to avoid underrun glitches
+  private val minHwBuffer = AudioTrack.getMinBufferSize(
     sampleRate,
     AudioFormat.CHANNEL_OUT_MONO,
     AudioFormat.ENCODING_PCM_16BIT
-  ).coerceAtLeast(4096)
+  )
+  private val audioTrackBufferSize = (minHwBuffer * 4).coerceAtLeast(16384)
+  private val renderChunkSize = 1024 // ~23ms of audio per write chunk
 
   private var audioTrack: AudioTrack? = null
   private var playbackJob: Job? = null
@@ -105,28 +108,30 @@ class RealtimeAudioEngine(
         Log.e("RealtimeAudioEngine", "AudioTrack play error", e)
       }
 
-      val buffer = ShortArray(bufferSize / 2)
-      var sampleIndex = (positionMs * sampleRate / 1000L).toDouble()
+      val buffer = ShortArray(renderChunkSize)
+
+      // Continuous Phase Accumulators for pure, click-free synthesis
+      val chordPhases = DoubleArray(4) { 0.0 }
+      var bassPhase = 0.0
+      var leadPhase = 0.0
+      var kickPhase = 0.0
+      var noiseFilter = 0.0
 
       val trackBpm = currentTrack?.bpm ?: 90
       val beatDurationSec = 60.0 / trackBpm
-      val chordDurationSec = beatDurationSec * 4.0 // 1 chord per 4 beats (measure)
+      val barDurationSec = beatDurationSec * 4.0 // 4 beats per bar
       val chords = currentTrack?.chordProgression?.ifEmpty { null }
         ?: listOf(floatArrayOf(146.83f, 293.66f, 349.23f, 440.0f))
 
-      var lastPositionUpdateTime = System.currentTimeMillis()
       val random = java.util.Random(1337)
 
-      while (isActive && isPlayingState) {
-        val now = System.currentTimeMillis()
-        val dt = now - lastPositionUpdateTime
-        lastPositionUpdateTime = now
+      // Pentatonic / chord melody steps for musicality (8 subdivisions per bar)
+      val melodyPattern = intArrayOf(0, 2, 1, 3, 2, 1, 3, 0)
 
-        positionMs += (dt * playbackSpeed).toLong()
+      while (isActive && isPlayingState) {
         if (positionMs >= durationMs) {
           if (isLooping) {
             positionMs = 0L
-            sampleIndex = 0.0
           } else {
             positionMs = durationMs
             _currentPosition.value = positionMs
@@ -136,7 +141,6 @@ class RealtimeAudioEngine(
             break
           }
         }
-        _currentPosition.value = positionMs
 
         val masterVol = if (isMuted) 0f else volumeLevel
         val effVocals = if (stemVocalsMuted) 0f else stemVocalsLevel * masterVol
@@ -146,107 +150,150 @@ class RealtimeAudioEngine(
 
         var sumSquares = 0.0
 
-        for (i in buffer.indices) {
-          val t = (sampleIndex + i) / sampleRate
-          val currentSec = t % (durationMs / 1000.0)
+        for (i in 0 until renderChunkSize) {
+          val currentSec = (positionMs / 1000.0 + (i.toDouble() / sampleRate) * playbackSpeed) % (durationMs / 1000.0)
 
-          // 1. Chords & Harmony
-          val chordIdx = ((currentSec / chordDurationSec).toInt()) % chords.size
+          // 1. Warm Rhodes Electric Piano (Chords with natural strike & warm decay envelope)
+          val chordIdx = ((currentSec / barDurationSec).toInt()) % chords.size
           val activeNotes = chords[chordIdx]
+          val timeInBar = currentSec % barDurationSec
+
+          // Struck key decay: fast warm attack then gentle decay like a Fender Rhodes piano
+          val chordEnvelope = kotlin.math.exp(-timeInBar * 1.2).toFloat() * 0.70f + 0.30f
 
           var chordsWave = 0.0
           if (effChords > 0f) {
-            for ((noteIdx, freq) in activeNotes.withIndex()) {
-              if (freq < 150f) continue // Skip sub-bass in mid-chords
-              val fundamental = sin(2.0 * PI * freq * t)
-              val overtone = 0.25 * sin(4.0 * PI * freq * t + 0.3)
-              chordsWave += (fundamental + overtone) * (0.4 / (noteIdx + 1))
+            for (noteIdx in 0 until 4) {
+              val freq = if (noteIdx < activeNotes.size) activeNotes[noteIdx].toDouble() else 0.0
+              if (freq > 80.0) {
+                chordPhases[noteIdx] += 2.0 * PI * freq / sampleRate
+                if (chordPhases[noteIdx] >= 2.0 * PI) chordPhases[noteIdx] -= 2.0 * PI
+
+                // Warm Rhodes harmonics (fundamental + soft bell overtone)
+                val fundamental = sin(chordPhases[noteIdx])
+                val bellOvertone = 0.18 * sin(chordPhases[noteIdx] * 2.0)
+                val softTine = 0.05 * sin(chordPhases[noteIdx] * 3.0)
+                chordsWave += (fundamental + bellOvertone + softTine) * (0.28 / (noteIdx + 1))
+              }
             }
+            chordsWave *= chordEnvelope
           }
 
-          // 2. Bassline stem (Root sub-harmonic note pulsing on beat)
+          // 2. Warm Lofi Bass (Deep, rounded sub-bass pulsing gently on beats 1 and 3)
           var bassWave = 0.0
           if (effBass > 0f) {
-            val rootBassFreq = activeNotes.firstOrNull() ?: 110.0f
-            val bassEnv = 0.7 + 0.3 * sin(2.0 * PI * (trackBpm / 60.0) * t)
-            bassWave = (sin(2.0 * PI * rootBassFreq * t) + 0.35 * sin(PI * rootBassFreq * t)) * bassEnv
+            val rootBassFreq = (activeNotes.firstOrNull()?.toDouble() ?: 110.0).coerceIn(45.0, 110.0)
+            bassPhase += 2.0 * PI * rootBassFreq / sampleRate
+            if (bassPhase >= 2.0 * PI) bassPhase -= 2.0 * PI
+
+            val timeInBeat = currentSec % beatDurationSec
+            val bassPluck = kotlin.math.exp(-timeInBeat * 3.2).toFloat() * 0.65f + 0.35f
+            // Deep sub fundamental with mild 2nd harmonic warmth
+            bassWave = (sin(bassPhase) + 0.15 * sin(bassPhase * 2.0)) * bassPluck * 0.75
           }
 
-          // 3. Vocals / Melody stem (Arpeggiated melodic lead flowing above the chords)
+          // 3. Acoustic Kalimba / Harp Melody (Discrete musical notes with gentle pluck envelope - NO SIREN GLIDE)
           var vocalMelodyWave = 0.0
           if (effVocals > 0f) {
-            val noteStep = ((currentSec * (trackBpm / 30.0)).toInt()) % activeNotes.size
-            val leadFreq = (activeNotes.getOrElse(noteStep) { 440f }) * 2.0f
-            val vibrato = 1.0 + 0.008 * sin(2.0 * PI * 5.5 * t)
-            val leadNote = sin(2.0 * PI * (leadFreq * vibrato) * t)
-            val leadHarmonic = 0.3 * sin(4.0 * PI * (leadFreq * vibrato) * t)
-            vocalMelodyWave = (leadNote + leadHarmonic) * 0.6
+            val subStepDuration = beatDurationSec / 2.0 // 8th note steps
+            val stepIndex = ((currentSec / subStepDuration).toInt()) % melodyPattern.size
+            val noteToneIdx = melodyPattern[stepIndex] % activeNotes.size
+            val discreteFreq = (activeNotes.getOrElse(noteToneIdx) { 440f }).toDouble() * 1.5
+
+            leadPhase += 2.0 * PI * discreteFreq / sampleRate
+            if (leadPhase >= 2.0 * PI) leadPhase -= 2.0 * PI
+
+            val timeInNote = currentSec % subStepDuration
+            // Pluck envelope: sharp acoustic attack (0-5ms) then exponential sweet decay
+            val pluckEnv = kotlin.math.exp(-timeInNote * 6.5).toFloat()
+
+            // Sweet bell/kalimba tone (warm sine with warm undertone)
+            val bellWave = sin(leadPhase) + 0.12 * sin(leadPhase * 2.0)
+            vocalMelodyWave = bellWave * pluckEnv * 0.55
           }
 
-          // 4. Rhythm & Beats stem (Acoustic kick & snare click on tempo)
+          // 4. Acoustic Chill Drum Kit (Solid thump kick, warm rimshot, delicate closed hi-hat)
           var rhythmWave = 0.0
           if (effRhythm > 0f) {
-            val beatPhase = (currentSec / beatDurationSec) % 1.0
+            val timeInBeat = currentSec % beatDurationSec
             val beatNumber = (currentSec / beatDurationSec).toInt() % 4
-            // Kick on beats 0 and 2, Snare on beats 1 and 3
+
             if (beatNumber == 0 || beatNumber == 2) {
-              // Deep Kick click & decay
-              if (beatPhase < 0.15) {
-                val decay = 1.0 - (beatPhase / 0.15)
-                val kickFreq = 65.0 * decay + 40.0
-                rhythmWave = sin(2.0 * PI * kickFreq * t) * decay * 0.9
+              // Solid Sub Kick: Tight 15ms punch into a warm 52Hz low end (no laser sweep)
+              if (timeInBeat < 0.18) {
+                val kickEnv = kotlin.math.exp(-timeInBeat * 22.0).toFloat()
+                val kickPitch = 52.0 + 35.0 * kotlin.math.exp(-timeInBeat * 80.0)
+                kickPhase += 2.0 * PI * kickPitch / sampleRate
+                if (kickPhase >= 2.0 * PI) kickPhase -= 2.0 * PI
+                rhythmWave += sin(kickPhase) * kickEnv * 0.85
               }
             } else {
-              // Snare / Hi-hat burst
-              if (beatPhase < 0.10) {
-                val decay = 1.0 - (beatPhase / 0.10)
-                val noise = (random.nextDouble() * 2.0 - 1.0)
-                rhythmWave = noise * decay * 0.55
+              // Warm Wooden Rimshot / Snare: Soft resonant pop + gentle acoustic brush
+              if (timeInBeat < 0.12) {
+                val snareEnv = kotlin.math.exp(-timeInBeat * 30.0).toFloat()
+                val snareBody = sin(2.0 * PI * 185.0 * timeInBeat) * snareEnv * 0.4
+                val rawNoise = (random.nextDouble() * 2.0 - 1.0)
+                noiseFilter = noiseFilter * 0.65 + rawNoise * 0.35
+                val snareSnap = noiseFilter * snareEnv * 0.25
+                rhythmWave += (snareBody + snareSnap)
               }
+            }
+
+            // Delicate Shaker / Hi-Hat on 8th-note offbeats
+            val halfBeatTime = timeInBeat % (beatDurationSec / 2.0)
+            if (halfBeatTime < 0.04) {
+              val hatEnv = kotlin.math.exp(-halfBeatTime * 80.0).toFloat()
+              val rawHiss = (random.nextDouble() * 2.0 - 1.0)
+              rhythmWave += rawHiss * hatEnv * 0.12
             }
           }
 
-          // Mix stems with limiter
-          val composite = (chordsWave * effChords * 0.45 +
-              bassWave * effBass * 0.55 +
-              vocalMelodyWave * effVocals * 0.50 +
-              rhythmWave * effRhythm * 0.40) * 16000.0
+          // Master Stem Blending with headroom
+          val composite = (chordsWave * effChords * 0.40 +
+              bassWave * effBass * 0.45 +
+              vocalMelodyWave * effVocals * 0.40 +
+              rhythmWave * effRhythm * 0.40)
 
-          val clamped = composite.coerceIn(-31500.0, 31500.0)
-          buffer[i] = clamped.toInt().toShort()
-          sumSquares += clamped * clamped
+          // Analog Soft-Saturation (Tanh) to prevent any digital distortion or clicking
+          val warmSaturated = tanh(composite * 1.05)
+          val sampleShort = (warmSaturated * 26000.0).toInt().toShort()
+
+          buffer[i] = sampleShort
+          sumSquares += warmSaturated * warmSaturated
         }
 
-        sampleIndex += buffer.size
-
+        // Blocking write to AudioTrack perfectly synchronizes with hardware audio clock
         try {
-          audioTrack?.write(buffer, 0, buffer.size)
+          audioTrack?.write(buffer, 0, renderChunkSize)
         } catch (e: Exception) {
           Log.e("RealtimeAudioEngine", "AudioTrack write error", e)
         }
 
-        val rms = sqrt(sumSquares / buffer.size) / 32768.0
-        val normalizedRms = (rms.toFloat() * 2.8f).coerceIn(0f, 1f)
+        // Synchronize position directly with samples played
+        val elapsedMsInChunk = ((renderChunkSize.toDouble() / sampleRate) * 1000.0 * playbackSpeed).toLong()
+        positionMs += elapsedMsInChunk
+        _currentPosition.value = positionMs
+
+        // Visualizer metering calculated from written buffer
+        val rms = sqrt(sumSquares / renderChunkSize)
+        val normalizedRms = (rms.toFloat() * 1.5f).coerceIn(0f, 1f)
         _liveRmsAmplitude.value = normalizedRms
 
-        val speedFactor = playbackSpeed
         val currentSec = positionMs / 1000.0
-        val bandPulse = sin(currentSec * 8.0 * speedFactor).toFloat()
-        val bandPulse2 = sin(currentSec * 12.0 * speedFactor + 1.2).toFloat()
-        val bandPulse3 = sin(currentSec * 5.0 * speedFactor + 2.5).toFloat()
+        val bandPulse = sin(currentSec * 8.0).toFloat()
+        val bandPulse2 = sin(currentSec * 12.0 + 1.2).toFloat()
+        val bandPulse3 = sin(currentSec * 5.0 + 2.5).toFloat()
 
         _liveFrequencyBands.value = listOf(
-          (normalizedRms * 0.95f + 0.15f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.85f + 0.20f * (bandPulse3 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.75f + 0.25f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.90f + 0.18f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.80f + 0.22f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.70f + 0.15f * (bandPulse3 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.60f + 0.12f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
-          (normalizedRms * 0.50f + 0.10f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f)
+          (normalizedRms * 0.95f + 0.12f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.85f + 0.15f * (bandPulse3 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.75f + 0.20f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.90f + 0.14f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.80f + 0.18f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.70f + 0.12f * (bandPulse3 * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.60f + 0.10f * (bandPulse * 0.5f + 0.5f)).coerceIn(0.08f, 1f),
+          (normalizedRms * 0.50f + 0.08f * (bandPulse2 * 0.5f + 0.5f)).coerceIn(0.08f, 1f)
         )
-
-        delay(16)
       }
     }
   }
@@ -327,7 +374,7 @@ class RealtimeAudioEngine(
               .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
               .build()
           )
-          .setBufferSizeInBytes(bufferSize)
+          .setBufferSizeInBytes(audioTrackBufferSize)
           .setTransferMode(AudioTrack.MODE_STREAM)
           .build()
       } catch (e: Exception) {
@@ -341,3 +388,4 @@ class RealtimeAudioEngine(
     _liveFrequencyBands.value = List(8) { 0.05f }
   }
 }
+

@@ -59,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -437,6 +438,10 @@ fun LyricsScreen(
   var isCopied by remember { mutableStateOf(false) }
   var showSavedSheet by remember { mutableStateOf(false) }
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+  LaunchedEffect(uiState.lyrics) {
+    isCopied = false
+  }
 
   val genrePresets = listOf(
     "Cyberpunk Synthwave",
@@ -844,6 +849,7 @@ fun LyricsScreen(
                 modifier = Modifier
                   .fillMaxSize()
                   .verticalScroll(scrollState)
+                  .padding(end = 44.dp)
                   .testTag("lyrics_scroll_column"),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
               ) {
@@ -874,6 +880,42 @@ fun LyricsScreen(
                       color = StudioTextPrimary
                     )
                   }
+                }
+              }
+
+              // 'Copy to Clipboard' Icon Button inside the scrollable text display area
+              Surface(
+                shape = CircleShape,
+                color = if (isCopied) StudioTurquoiseTint else StudioSurfaceCard.copy(alpha = 0.92f),
+                border = BorderStroke(
+                  width = 1.dp,
+                  color = if (isCopied) StudioCyan else StudioCardBorder
+                ),
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                  .align(Alignment.TopEnd)
+                  .padding(2.dp)
+              ) {
+                IconButton(
+                  onClick = {
+                    val fullText = if (uiState.songTitle.isNotBlank()) {
+                      "${uiState.songTitle}\n\n${uiState.lyrics}"
+                    } else {
+                      uiState.lyrics
+                    }
+                    clipboardManager.setText(AnnotatedString(fullText))
+                    isCopied = true
+                  },
+                  modifier = Modifier
+                    .size(42.dp)
+                    .testTag("copy_to_clipboard_icon_button")
+                ) {
+                  Icon(
+                    imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                    contentDescription = "Copy to Clipboard",
+                    tint = if (isCopied) StudioCyanDark else StudioTextPrimary,
+                    modifier = Modifier.size(18.dp)
+                  )
                 }
               }
             } else {

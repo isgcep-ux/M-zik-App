@@ -40,6 +40,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.rotate
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Layers
@@ -99,6 +102,7 @@ import com.example.ui.components.AiMusicComposerView
 import com.example.ui.components.FfmpegMergeView
 import com.example.ui.components.LiveSpectrumVisualizer
 import com.example.ui.components.LyricsChordsView
+import com.example.ui.components.MiniLiveWaveform
 import com.example.ui.components.StemMixerView
 import com.example.ui.components.WaveformVisualizer
 import com.example.ui.components.formatTimestamp
@@ -153,6 +157,7 @@ fun AudioPlayerScreen(
       FloatingStudioDock(
         track = currentTrack,
         isPlaying = uiState.isPlaying,
+        liveRms = uiState.liveRmsAmplitude,
         currentPositionMs = uiState.effectivePositionMs,
         totalDurationMs = uiState.totalDurationMs,
         onTogglePlay = { viewModel.togglePlayPause() },
@@ -471,7 +476,8 @@ private fun FloatingStudioDock(
   onTogglePlay: () -> Unit,
   onPrevTrack: () -> Unit,
   onNextTrack: () -> Unit,
-  onOpenPlayer: () -> Unit
+  onOpenPlayer: () -> Unit,
+  liveRms: Float = 0f
 ) {
   Box(
     modifier = Modifier
@@ -560,6 +566,15 @@ private fun FloatingStudioDock(
                   )
                 }
                 Spacer(modifier = Modifier.width(6.dp))
+                if (isPlaying) {
+                  MiniLiveWaveform(
+                    isPlaying = true,
+                    energy = liveRms,
+                    barCount = 4,
+                    barColor = StudioCyanDark
+                  )
+                  Spacer(modifier = Modifier.width(6.dp))
+                }
                 Text(
                   text = "${formatTimestamp(currentPositionMs)} / ${formatTimestamp(totalDurationMs)}",
                   fontSize = 11.sp,
@@ -669,10 +684,12 @@ private fun PlayerViewContent(
 
     Spacer(modifier = Modifier.height(14.dp))
 
-    // Stem / Track Selector Chips
+    // Stem / Track Selector Chips with Live Visualizer indicator
     StemTrackSelector(
       tracks = uiState.tracks,
       selectedIndex = uiState.currentTrackIndex,
+      isPlaying = uiState.isPlaying,
+      liveRms = uiState.liveRmsAmplitude,
       onSelect = { viewModel.selectTrack(it) }
     )
 
@@ -725,12 +742,13 @@ private fun PlayerViewContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Real-time Waveform Canvas
+        // Real-time Dynamic Waveform Canvas & Visualizer
         WaveformVisualizer(
           waveformData = currentTrack.waveformData,
           playbackProgress = uiState.playbackProgress,
           isPlaying = uiState.isPlaying,
           liveRms = uiState.liveRmsAmplitude,
+          liveFrequencyBands = uiState.liveFrequencyBands,
           isScrubbing = uiState.isScrubbing,
           scrubPositionMs = uiState.scrubPositionMs,
           totalDurationMs = uiState.totalDurationMs,
@@ -895,6 +913,8 @@ private fun SpecBadge(label: String) {
 private fun StemTrackSelector(
   tracks: List<com.example.audio.AudioTrackInfo>,
   selectedIndex: Int,
+  isPlaying: Boolean = false,
+  liveRms: Float = 0f,
   onSelect: (Int) -> Unit
 ) {
   LazyRow(
@@ -911,11 +931,24 @@ private fun StemTrackSelector(
         selected = isSelected,
         onClick = { onSelect(index) },
         label = {
-          Text(
-            text = track.stemType.label,
-            fontSize = 12.sp,
-            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-          )
+          Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+          ) {
+            Text(
+              text = track.stemType.label,
+              fontSize = 12.sp,
+              fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+            )
+            if (isSelected && isPlaying) {
+              MiniLiveWaveform(
+                isPlaying = true,
+                energy = liveRms,
+                barCount = 3,
+                barColor = StudioCyanDark
+              )
+            }
+          }
         },
         colors = FilterChipDefaults.filterChipColors(
           selectedContainerColor = StudioTurquoiseTint,
@@ -1107,9 +1140,9 @@ private fun VolumeControlSection(
         .testTag("mute_toggle_button")
     ) {
       val volumeIcon = when {
-        isMuted || volume == 0f -> Icons.Default.VolumeMute
-        volume < 0.5f -> Icons.Default.VolumeDown
-        else -> Icons.Default.VolumeUp
+        isMuted || volume == 0f -> Icons.AutoMirrored.Filled.VolumeMute
+        volume < 0.5f -> Icons.AutoMirrored.Filled.VolumeDown
+        else -> Icons.AutoMirrored.Filled.VolumeUp
       }
       Icon(
         imageVector = volumeIcon,
