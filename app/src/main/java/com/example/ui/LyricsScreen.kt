@@ -629,7 +629,8 @@ fun LyricsScreen(
             },
             modifier = Modifier
               .fillMaxWidth()
-              .testTag("lyrics_genre_theme_text_field"),
+              .testTag("lyrics_genre_theme_text_field")
+              .testTag("song_theme_input"),
             colors = OutlinedTextFieldDefaults.colors(
               focusedContainerColor = StudioSurfaceVariant.copy(alpha = 0.4f),
               unfocusedContainerColor = StudioSurfaceVariant.copy(alpha = 0.4f),
@@ -842,6 +843,7 @@ fun LyricsScreen(
               .background(StudioSurfaceVariant.copy(alpha = 0.35f))
               .padding(14.dp)
               .testTag("scrollable_lyrics_container")
+              .testTag("lyrics_display_area")
           ) {
             if (uiState.lyrics.isNotBlank()) {
               val scrollState = rememberScrollState()

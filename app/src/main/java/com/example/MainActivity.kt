@@ -16,6 +16,7 @@ import com.example.ui.AudioPlayerScreen
 import com.example.ui.LyricsScreen
 import com.example.ui.LyricsViewModel
 import com.example.ui.SavedLyricsScreen
+import com.example.ui.SongLyricGeneratorScreen
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
@@ -39,7 +40,7 @@ fun MainAppContent() {
   Crossfade(targetState = currentScreen, label = "ScreenTransition") { screen ->
     when (screen) {
       "lyrics" -> {
-        LyricsScreen(
+        SongLyricGeneratorScreen(
           viewModel = lyricsViewModel,
           onNavigateToPlayer = { currentScreen = "player" },
           onNavigateToSaved = { currentScreen = "saved" }

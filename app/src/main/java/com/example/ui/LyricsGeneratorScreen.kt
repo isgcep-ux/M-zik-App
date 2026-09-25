@@ -291,7 +291,8 @@ fun LyricsGeneratorScreen(
             },
             modifier = Modifier
               .fillMaxWidth()
-              .testTag("lyrics_theme_genre_input"),
+              .testTag("lyrics_theme_genre_input")
+              .testTag("song_theme_input"),
             colors = OutlinedTextFieldDefaults.colors(
               focusedContainerColor = StudioSurfaceVariant.copy(alpha = 0.4f),
               unfocusedContainerColor = StudioSurfaceVariant.copy(alpha = 0.4f),
@@ -629,7 +630,9 @@ fun LyricsGeneratorScreen(
                 shape = RoundedCornerShape(14.dp),
                 color = StudioSurfaceVariant.copy(alpha = 0.4f),
                 border = BorderStroke(1.dp, StudioCardBorder),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                  .fillMaxWidth()
+                  .testTag("lyrics_display_area")
               ) {
                 Column(
                   modifier = Modifier
